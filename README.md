@@ -1,47 +1,72 @@
-# Bridge to Success — No-Login Extractor (Web Service)
+# Bridge to Success — No-Login Extractor (API + Telegram Bot)
 
-A Flask wrapper around the original CLI extractor
-(`bridgetosuccess_nologin_extractor.py`). All original extraction
-logic (course list, subjects, free videos/PDFs, full report builder)
-is preserved — it's just exposed over HTTP instead of an interactive
-terminal menu, so it can run as a long-lived web service on Koyeb.
+This project exposes the original CLI extractor
+(`bridgetosuccess_nologin_extractor.py`) two ways, sharing the exact
+same extraction logic via `extractor.py`:
+
+1. **Flask HTTP API** (`main.py`) — JSON/text endpoints
+2. **Telegram bot** (`bot.py`) — slash commands
+
+`app.py` runs both together in one process, which is what you deploy
+to Koyeb as a single Web Service.
 
 ## Files
 
-- `main.py` — Flask app + all extraction functions
-- `requirements.txt` — Python dependencies
-- `Dockerfile` — container build (recommended for Koyeb)
-- `Procfile` — fallback for buildpack-based deploys
+- `extractor.py` — all original extraction functions (unchanged logic)
+- `main.py` — Flask API
+- `bot.py` — Telegram bot commands
+- `app.py` — combined entrypoint (Flask in background thread + bot polling)
+- `requirements.txt`
+- `Dockerfile`
+- `Procfile`
 
-## Run locally
+## 1. Create your Telegram bot
+
+1. Open Telegram, message **@BotFather**.
+2. Send `/newbot`, follow the prompts, pick a name and username.
+3. BotFather gives you a token like `123456789:ABCdefGhIJKlmNoPQRstuVWxyz`.
+4. Keep this token secret.
+
+## 2. Run locally
 
 ```bash
 pip install -r requirements.txt
-python main.py
-# -> http://localhost:8000
+export TELEGRAM_BOT_TOKEN="123456789:ABCdefGhIJKlmNoPQRstuVWxyz"
+python app.py
 ```
 
-Or with Docker:
+This starts:
+- Flask API on `http://localhost:8000`
+- The Telegram bot (polling) — message your bot on Telegram to test it.
 
-```bash
-docker build -t bts-extractor .
-docker run -p 8000:8000 bts-extractor
-```
-
-## Deploy on Koyeb
+## 3. Deploy on Koyeb
 
 1. Push this folder to a GitHub repository.
 2. In the Koyeb dashboard: **Create Service → GitHub → select repo**.
-3. Koyeb detects the `Dockerfile` automatically and builds it.
-   (If you'd rather use the Python buildpack, delete the Dockerfile —
-   Koyeb will then use the `Procfile`.)
-4. Leave the port blank / default — Koyeb sets the `PORT` env var and
-   the app reads it automatically (`os.environ.get("PORT", 8000)`,
-   and `gunicorn -b 0.0.0.0:${PORT}` in the Dockerfile/Procfile).
-5. Deploy. Koyeb will give you a public URL like
-   `https://your-app.koyeb.app`.
+3. Koyeb detects the `Dockerfile` automatically.
+4. Add an environment variable:
+   - `TELEGRAM_BOT_TOKEN` = your bot token from BotFather
+5. Leave `PORT` alone — Koyeb sets it automatically and `app.py` reads it.
+6. Deploy. The Flask health endpoint (`/health`) keeps Koyeb happy,
+   while the bot runs polling in the same container.
 
-## Endpoints
+## Telegram Bot Commands
+
+| Command | Description |
+|---|---|
+| `/start` or `/help` | Welcome message + command list |
+| `/courses` | List all available courses with their IDs |
+| `/free` | Free videos & PDFs (no login required) |
+| `/info <course_id>` | Course info (description, faculty, etc.) |
+| `/subjects <course_id>` | Subjects/categories inside a course |
+| `/report <course_id>` | Full extraction report for one course (.txt file) |
+| `/courselist` | Info-only listing of all courses (.txt file) |
+| `/reportall` | Full extraction report for ALL courses (.txt file) — **slow!** |
+
+Get course IDs from `/courses` first, then use them with `/info`,
+`/subjects`, and `/report`.
+
+## Flask API Endpoints
 
 | Method & Path | Description |
 |---|---|
@@ -50,21 +75,23 @@ docker run -p 8000:8000 bts-extractor
 | `GET /api/courses` | All courses (allCourses + topCourses, merged & deduped) |
 | `GET /api/courses/all` | Raw `allCourses` |
 | `GET /api/courses/top` | Raw `topCourses` |
-| `GET /api/course/<course_id>/info` | Course info (description, faculty, etc.) |
+| `GET /api/course/<course_id>/info` | Course info |
 | `GET /api/course/<course_id>/subjects` | Subjects/categories for a course |
-| `GET /api/free-content` | Free videos & PDFs (no login) |
+| `GET /api/free-content` | Free videos & PDFs |
 | `GET /api/configuration` | App configuration |
 | `GET /api/banners` | Home banners |
-| `GET /api/course/<course_id>/report` | Full text report for one course. Add `?download=1` for a `.txt` file |
-| `GET /api/report/all` | Full text report for **all** courses. Add `?download=1` for a `.txt` file (slow — many requests) |
-| `GET /api/report/list` | Info-only listing of all courses. Add `?download=1` for a `.txt` file |
+| `GET /api/course/<course_id>/report` | Full text report for one course. `?download=1` for `.txt` |
+| `GET /api/report/all` | Full text report for ALL courses. `?download=1` for `.txt` (slow) |
+| `GET /api/report/list` | Info-only listing of all courses. `?download=1` for `.txt` |
 
 ## Notes
 
-- `/api/report/all` walks every course/subject and can take a while
-  (it sleeps briefly between requests to be polite to the upstream
-  API). Gunicorn's timeout is set to 120s in the Dockerfile — increase
-  it (and Koyeb's request timeout) if you have many courses, or call
-  it asynchronously from your client.
+- `/reportall` and `/api/report/all` walk every course and subject —
+  this can take several minutes for large catalogs. The bot will
+  reply once the file is ready; be patient with `/reportall`.
 - All headers/constants (`ktx`, `ktxx`, API base URLs, etc.) are
   unchanged from the original script.
+- If `/courses` or other commands return empty results, the upstream
+  API may be blocking your hosting provider's IP or the endpoint
+  may have changed — check the logs (`GET /health` confirms the
+  service itself is up).
